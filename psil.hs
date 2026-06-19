@@ -1,6 +1,8 @@
 -- Psil: a small Lisp-like functional language.          -*- coding: utf-8 -*-
 {-# OPTIONS_GHC -Wall #-}
 
+module Main (main, run, sexpOf, lexpOf, typeOf, valOf) where
+
 -- The interpreter is a single pipeline: lexer, parser, pretty printer,
 -- lowering to a typed core, a type checker, and an evaluator.
 
@@ -60,13 +62,13 @@ integer = do c <- digit
                  return (- n)
     where integer' :: Int -> Parser Int
           integer' n = do c <- digit
-                          integer' (10 * n + (digitToInt c))
+                          integer' (10 * n + digitToInt c)
                        <|> return n
 
 pSymchar :: Parser Char
 pSymchar    = alphaNum <|> satisfy (`elem` "!@$%^&*_+-=:|/?<>")
 pSymbol :: Parser Sexp
-pSymbol= do { s <- many1 (pSymchar);
+pSymbol= do { s <- many1 pSymchar;
               return (case parse integer "" s of
                         Right n -> Snum n
                         _ -> Ssym s)
@@ -79,14 +81,16 @@ pSymbol= do { s <- many1 (pSymchar);
 -- "'E" is shorthand for "(shorthand-quote E)", "`E" for
 -- "(shorthand-backquote E)", and ",E" for "(shorthand-comma E)".
 pQuote :: Parser Sexp
-pQuote = do { c <- satisfy (`elem` "'`,"); pSpaces; e <- pSexp;
-              return (Scons
-                      (Scons Snil
-                             (Ssym (case c of
-                                     ',' -> "shorthand-comma"
-                                     '`' -> "shorthand-backquote"
-                                     _   -> "shorthand-quote")))
-                      e) }
+pQuote = do
+    c <- satisfy (`elem` "'`,")
+    pSpaces
+    Scons
+      (Scons Snil
+        (Ssym (case c of
+                 ',' -> "shorthand-comma"
+                 '`' -> "shorthand-backquote"
+                 _   -> "shorthand-quote")))
+      <$> pSexp
 
 -- A list (Tsil) has the form ( [e .] {e} ).
 pTsil :: Parser Sexp
@@ -109,7 +113,7 @@ pTsil = do _ <- char '('
 
 -- Accepts any character; used to report errors.
 pAny :: Parser (Maybe Char)
-pAny = do { c <- anyChar ; return (Just c) } <|> return Nothing
+pAny = (Just <$> anyChar) <|> return Nothing
 
 -- A Sexp is a list, a symbol, or an integer.
 pSexpTop :: Parser Sexp
@@ -145,7 +149,7 @@ instance Read Sexp where
 
 showSexp' :: Sexp -> ShowS
 showSexp' Snil = showString "()"
-showSexp' (Snum n) = showsPrec 0 n
+showSexp' (Snum n) = shows n
 showSexp' (Ssym s) = showString s
 showSexp' (Scons e1 e2) = showHead (Scons e1 e2) . showString ")"
     where showHead (Scons Snil e') = showString "(" . showSexp' e'
@@ -153,9 +157,7 @@ showSexp' (Scons e1 e2) = showHead (Scons e1 e2) . showString ")"
               showHead e1' . showString " " . showSexp' e2'
           showHead e = showString "(" . showSexp' e . showString " ."
 
--- Convenience wrappers for reading and printing Sexps in GHCi.
-readSexp :: String -> Sexp
-readSexp = read
+-- Renders a Sexp back to its textual form.
 showSexp :: Sexp -> String
 showSexp e = showSexp' e ""
 
@@ -212,7 +214,7 @@ sexp2list s = loop s []
 s2l :: Sexp -> Either Error Lexp
 s2l (Snum n) = Right (Lnum n)
 s2l (Ssym s) = Right (Lvar s)
-s2l (se@(Scons _ _)) = do
+s2l se@(Scons _ _) = do
     selist <- sexp2list se
     case selist of
         [Ssym "hastype", e, t] -> Lhastype <$> s2l e <*> s2t t
@@ -262,7 +264,7 @@ s2l' se selist =
 s2t :: Sexp -> Either Error Ltype
 s2t (Ssym "Int") = Right Lint
 s2t (Ssym "Bool") = Right Lboo
-s2t (se@(Scons _ _)) = do
+s2t se@(Scons _ _) = do
     selist <- sexp2list se
     case selist of
         (Ssym "Tuple" : ts) -> Ltup <$> mapM s2t ts
@@ -293,7 +295,7 @@ s2d se (d : ds) = do
             [Ssym x, e] -> bind x (s2l e)
             [Ssym x, t, e] -> bind x (Lhastype <$> s2l e <*> s2t t)
             (Ssym x : es) -> do
-                args <- getArgs (init (init es))
+                args <- argNames (init (init es))
                 typs <- getTypes (init es)
                 bind x (Lhastype <$> s2l' se (Ssym "fun" : args ++ [last es])
                                  <*> s2t' se typs)
@@ -303,7 +305,7 @@ s2d se (d : ds) = do
             lexp <- body
             rest <- s2d se ds
             Right ((x, lexp) : rest)
-        getArgs = mapM firstSym
+        argNames = mapM firstSym
         firstSym a = do
             l <- sexp2list a
             case l of
@@ -383,31 +385,31 @@ eval2 senv (Lvar x) =
     let
         i = e2lookup senv x
     in
-        \venv -> venv !! i
+        (!! i)
 
 eval2 senv (Lcall o a) = \venv ->
     let
         Vfun _ f = eval2' o
         n = eval2' a
-        eval2' = \x -> (eval2 senv x) venv
+        eval2' x = eval2 senv x venv
     in
         f n
 
 eval2 senv (Lfun a e) =
-    \venv -> (Vfun Nothing (\v -> (eval2 (a : senv) e) (v : venv)))
+    \venv -> Vfun Nothing (\v -> eval2 (a : senv) e (v : venv))
 
 eval2 senv (Llet ds b) = \venv ->
     let
         (vars, exps) = unzip ds
         senv' = vars ++ senv
-        venv' = (map eval2' exps) ++ venv
-        eval2' = \v -> (eval2 senv' v) venv'
+        venv' = map eval2' exps ++ venv
+        eval2' v = eval2 senv' v venv'
     in
         eval2' b
 
 eval2 senv (Lif e1 e2 e3) = \venv ->
     let
-        eval2' = \x -> (eval2 senv x) venv
+        eval2' x = eval2 senv x venv
     in
         case eval2' e1 of
             Vbool True -> eval2' e2
@@ -415,17 +417,17 @@ eval2 senv (Lif e1 e2 e3) = \venv ->
 
 eval2 senv (Ltuple e) = \venv ->
     let
-        eval2' = \v -> (eval2 senv v) venv
+        eval2' v = eval2 senv v venv
     in
         Vtuple (map eval2' e)
 
 eval2 senv (Lfetch tup vs e) = \venv ->
     let
-        Vtuple tuplist = (eval2 senv tup) venv
+        Vtuple tuplist = eval2 senv tup venv
         senv' = vs ++ senv
         venv' = tuplist ++ venv
     in
-        (eval2 senv' e) venv'
+        eval2 senv' e venv'
 
 ---------------------------------------------------------------------------
 -- Type checker                                                          --
@@ -435,7 +437,7 @@ type TEnv = [(Var, Ltype)]
 
 -- Values are irrelevant to type checking, so keep only the types from env0.
 tenv0 :: TEnv
-tenv0 = (map (\(x,_,t) -> (x,t)) env0)
+tenv0 = map (\(x,_,t) -> (x,t)) env0
 
 -- Looks up the type of a variable.
 tlookup :: [(Var, a)] -> Var -> Either Error a
