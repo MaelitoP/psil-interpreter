@@ -1,37 +1,28 @@
--- TP-1  --- Implantation d'une sorte de Lisp          -*- coding: utf-8 -*-
+-- Psil: a small Lisp-like functional language.          -*- coding: utf-8 -*-
 {-# OPTIONS_GHC -Wall #-}
 
--- Ce fichier défini les fonctionalités suivantes:
--- - Analyseur lexical
--- - Analyseur syntaxique
--- - Pretty printer
--- - Implantation du langage
+-- The interpreter is a single pipeline: lexer, parser, pretty printer,
+-- lowering to a typed core, a type checker, and an evaluator.
+
+import Text.ParserCombinators.Parsec
+import Data.Char
+import System.IO
 
 ---------------------------------------------------------------------------
--- Importations de librairies et définitions de fonctions auxiliaires    --
+-- Internal representation of expressions                                --
 ---------------------------------------------------------------------------
-
-import Text.ParserCombinators.Parsec -- Bibliothèque d'analyse syntaxique.
-import Data.Char              -- Conversion de Chars de/vers Int et autres.
-import System.IO              -- Pour stdout, hPutStr
-
----------------------------------------------------------------------------
--- La représentation interne des expressions de notre language           --
----------------------------------------------------------------------------
-data Sexp = Snil                        -- La liste vide
-          | Scons Sexp Sexp             -- Une paire
-          | Ssym String                 -- Un symbole
-          | Snum Int                    -- Un entier
-          -- Génère automatiquement un pretty-printer et une fonction de
-          -- comparaison structurelle.
+data Sexp = Snil                        -- Empty list
+          | Scons Sexp Sexp             -- Pair
+          | Ssym String                 -- Symbol
+          | Snum Int                    -- Integer
           deriving (Show, Eq)
 
--- Exemples:
+-- Examples:
 -- (+ 2 3)  ==  (((() . +) . 2) . 3)
 --          ==>  Scons (Scons (Scons Snil (Ssym "+"))
 --                            (Snum 2))
 --                     (Snum 3)
---                   
+--
 -- (/ (* (- 68 32) 5) 9)
 --     ==  (((() . /) . (((() . *) . (((() . -) . 68) . 32)) . 5)) . 9)
 --     ==>
@@ -44,14 +35,14 @@ data Sexp = Snil                        -- La liste vide
 --       (Snum 9)
 
 ---------------------------------------------------------------------------
--- Analyseur lexical                                                     --
+-- Lexer                                                                 --
 ---------------------------------------------------------------------------
 
 pChar :: Char -> Parser ()
 pChar c = do { _ <- char c; return () }
 
 pComment :: Parser ()
-pComment = do { pChar ';'; _ <- many (satisfy (\c -> not (c == '\n')));
+pComment = do { pChar ';'; _ <- many (satisfy (/= '\n'));
                 pChar '\n'; return ()
               }
 
@@ -62,7 +53,7 @@ pSpaces =
 integer     :: Parser Int
 integer = do c <- digit
              integer' (digitToInt c)
-          <|> do _ <- satisfy (\c -> (c == '-'))
+          <|> do _ <- satisfy (== '-')
                  n <- integer
                  return (- n)
     where integer' :: Int -> Parser Int
@@ -71,7 +62,7 @@ integer = do c <- digit
                        <|> return n
 
 pSymchar :: Parser Char
-pSymchar    = alphaNum <|> satisfy (\c -> c `elem` "!@$%^&*_+-=:|/?<>")
+pSymchar    = alphaNum <|> satisfy (`elem` "!@$%^&*_+-=:|/?<>")
 pSymbol :: Parser Sexp
 pSymbol= do { s <- many1 (pSymchar);
               return (case parse integer "" s of
@@ -80,14 +71,13 @@ pSymbol= do { s <- many1 (pSymchar);
             }
 
 ---------------------------------------------------------------------------
--- Analyseur syntaxique                                                  --
+-- Parser                                                                --
 ---------------------------------------------------------------------------
 
--- La notation "'E" est équivalente à "(shorthand-quote E)"
--- La notation "`E" est équivalente à "(shorthand-backquote E)"
--- La notation ",E" est équivalente à "(shorthand-comma E)"
+-- "'E" is shorthand for "(shorthand-quote E)", "`E" for
+-- "(shorthand-backquote E)", and ",E" for "(shorthand-comma E)".
 pQuote :: Parser Sexp
-pQuote = do { c <- satisfy (\c -> c `elem` "'`,"); pSpaces; e <- pSexp;
+pQuote = do { c <- satisfy (`elem` "'`,"); pSpaces; e <- pSexp;
               return (Scons
                       (Scons Snil
                              (Ssym (case c of
@@ -96,7 +86,7 @@ pQuote = do { c <- satisfy (\c -> c `elem` "'`,"); pSpaces; e <- pSexp;
                                      _   -> "shorthand-quote")))
                       e) }
 
--- Une liste (Tsil) est de la forme ( [e .] {e} )
+-- A list (Tsil) has the form ( [e .] {e} ).
 pTsil :: Parser Sexp
 pTsil = do _ <- char '('
            pSpaces
@@ -115,11 +105,11 @@ pTsil = do _ <- char '('
                         pSpaces
                         pLiat (Scons hd e)
 
--- Accepte n'importe quel caractère: utilisé en cas d'erreur.
+-- Accepts any character; used to report errors.
 pAny :: Parser (Maybe Char)
 pAny = do { c <- anyChar ; return (Just c) } <|> return Nothing
 
--- Une Sexp peut-être une liste, un symbole ou un entier.
+-- A Sexp is a list, a symbol, or an integer.
 pSexpTop :: Parser Sexp
 pSexpTop = do { pTsil <|> pQuote <|> pSymbol
                 <|> do { x <- pAny;
@@ -129,29 +119,26 @@ pSexpTop = do { pTsil <|> pQuote <|> pSymbol
                        }
               }
 
--- On distingue l'analyse syntaxique d'une Sexp principale de celle d'une
--- sous-Sexp: si l'analyse d'une sous-Sexp échoue à EOF, c'est une erreur de
--- syntaxe alors que si l'analyse de la Sexp principale échoue cela peut être
--- tout à fait normal.
+-- A top-level Sexp and a sub-Sexp are parsed differently: a sub-Sexp failing
+-- at EOF is a syntax error, whereas a top-level Sexp failing there is normal.
 pSexp :: Parser Sexp
 pSexp = pSexpTop <|> error "Unexpected end of stream"
 
--- Une séquence de Sexps.
+-- A sequence of Sexps.
 pSexps :: Parser [Sexp]
 pSexps = do pSpaces
             many (do e <- pSexpTop
                      pSpaces
                      return e)
 
--- Déclare que notre analyseur syntaxique peut-être utilisé pour la fonction
--- générique "read".
+-- Lets the parser back the generic "read".
 instance Read Sexp where
     readsPrec _ s = case parse pSexp "" s of
                       Left _ -> []
                       Right e -> [(e,"")]
 
 ---------------------------------------------------------------------------
--- Sexp Pretty Printer                                                   --
+-- Sexp pretty printer                                                   --
 ---------------------------------------------------------------------------
 
 showSexp' :: Sexp -> ShowS
@@ -164,25 +151,14 @@ showSexp' (Scons e1 e2) = showHead (Scons e1 e2) . showString ")"
               showHead e1' . showString " " . showSexp' e2'
           showHead e = showString "(" . showSexp' e . showString " ."
 
--- On peut utiliser notre pretty-printer pour la fonction générique "show"
--- (utilisée par la boucle interactive de GHCi).  Mais avant de faire cela,
--- il faut enlever le "deriving Show" dans la déclaration de Sexp.
-
--- instance Show Sexp where
---     showsPrec p = showSexp'
-
-
--- Pour lire et imprimer des Sexp plus facilement dans la boucle interactive
--- de Hugs/GHCi:
+-- Convenience wrappers for reading and printing Sexps in GHCi.
 readSexp :: String -> Sexp
 readSexp = read
 showSexp :: Sexp -> String
 showSexp e = showSexp' e ""
 
-this is an error
-
 ---------------------------------------------------------------------------
--- Représentation intermédiaire                                          --
+-- Core language                                                         --
 ---------------------------------------------------------------------------
 
 type Var = String
@@ -193,36 +169,34 @@ data Ltype = Lint                   -- Int
            | Ltup [Ltype]           -- tuple τ₁...τₙ
            deriving (Show, Eq)
 
-data Lexp = Lnum Int                -- Constante entière.
-          | Lvar Var                -- Référence à une variable.
-          | Lhastype Lexp Ltype     -- Annotation de type.
-          | Lcall Lexp Lexp         -- Appel de fonction, avec un argument.
-          | Lfun Var Lexp           -- Fonction anonyme prenant un argument.
-          -- Déclaration d'une liste de variables qui peuvent être
-          -- mutuellement récursives.
-          | Llet [(Var, Lexp)] Lexp
-          | Lif Lexp Lexp Lexp      -- Expression conditionelle.
-          | Ltuple [Lexp]           -- Construction de tuple
-          | Lfetch Lexp [Var] Lexp  -- lecture d'un tuple
+data Lexp = Lnum Int                -- Integer constant
+          | Lvar Var                -- Variable reference
+          | Lhastype Lexp Ltype     -- Type annotation
+          | Lcall Lexp Lexp         -- Function call (one argument)
+          | Lfun Var Lexp           -- Anonymous one-argument function
+          | Llet [(Var, Lexp)] Lexp -- Possibly mutually recursive bindings
+          | Lif Lexp Lexp Lexp      -- Conditional
+          | Ltuple [Lexp]           -- Tuple construction
+          | Lfetch Lexp [Var] Lexp  -- Tuple destructuring
           deriving (Show, Eq)
 
 ---------------------------------------------------------------------------
--- Conversion de Sexp à Lexp                                             --
+-- Sexp to Lexp                                                          --
 ---------------------------------------------------------------------------
 
 argsNumError :: Sexp -> String
-argsNumError = \x -> "Insufficient arguments for expression " ++ showSexp x
+argsNumError x = "Insufficient arguments for expression " ++ showSexp x
 
 argsMatchError :: Sexp -> String
-argsMatchError = \x -> "Couldn't match expected arguments in: " ++ showSexp x
+argsMatchError x = "Couldn't match expected arguments in: " ++ showSexp x
 
 unrecExp :: Sexp -> String
-unrecExp = \x -> "Unrecognized Psil expression: " ++ showSexp x
+unrecExp x = "Unrecognized Psil expression: " ++ showSexp x
 
 unrecType :: Sexp -> String
-unrecType = \x -> "Unrecognized Psil type: " ++ showSexp x
+unrecType x = "Unrecognized Psil type: " ++ showSexp x
 
--- Convertit une liste Sexp en une liste Haskell avec les éléments d'intérêts
+-- Converts a Sexp list into a Haskell list of its elements.
 sexp2list :: Sexp -> [Sexp]
 sexp2list s = loop s []
     where
@@ -230,7 +204,7 @@ sexp2list s = loop s []
         loop Snil acc = acc
         loop _ _ = error ("Improper list: " ++ show s)
 
--- Analyse une Sexp et construit une Lexp équivalente
+-- Builds a Lexp from a Sexp.
 s2l :: Sexp -> Lexp
 s2l (Snum n) = Lnum n
 s2l (Ssym s) = Lvar s
@@ -239,7 +213,7 @@ s2l (se@(Scons _ _)) =
         selist = sexp2list se
     in
         case selist of
-            (Ssym "hastype" : e : t : []) -> Lhastype (s2l e) (s2t t)
+            [Ssym "hastype", e, t] -> Lhastype (s2l e) (s2t t)
             (Ssym "call" : es) ->
                 if length es < 2
                 then error (argsNumError se)
@@ -249,12 +223,12 @@ s2l (se@(Scons _ _)) =
                 then error (argsNumError se)
                 else s2l' se selist
             (Ssym "let" : es) ->
-                if length es < 1
+                if null es
                 then error (argsNumError se)
                 else Llet (s2d se (init es)) (s2l (last es))
-            (Ssym "if" : e1 : e2 : e3 : []) -> Lif (s2l e1) (s2l e2) (s2l e3)
+            [Ssym "if", e1, e2, e3] -> Lif (s2l e1) (s2l e2) (s2l e3)
             (Ssym "tuple" : es) -> Ltuple (map s2l es)
-            (Ssym "fetch" : tpl : xs : e : []) -> Lfetch (s2l tpl)
+            [Ssym "fetch", tpl, xs, e] -> Lfetch (s2l tpl)
                 (map (\x -> case s2l x of
                     Lvar s -> s
                     _ -> error (argsMatchError se))
@@ -262,26 +236,24 @@ s2l (se@(Scons _ _)) =
             _ -> error (unrecExp se)
 s2l se = error (unrecExp se)
 
--- Fonction auxiliaire de s2l traitant les cas avec récursion (currying)
--- Fonction accomodant au sucre syntaxique de fonctions et d'appels de fonction
+-- Helper for s2l: handles currying for function definitions and calls.
 s2l' :: Sexp -> [Sexp] -> Lexp
 s2l' se selist =
     case selist of
-        (Ssym "call" : e : e1 : []) -> Lcall (s2l e) (s2l e1)
+        [Ssym "call", e, e1] -> Lcall (s2l e) (s2l e1)
         (Ssym "call" : es) ->
-            Lcall (s2l' se ([Ssym "call"] ++ init es)) (s2l (last es))
-        (Ssym "fun" : v : e : []) ->
+            Lcall (s2l' se (Ssym "call" : init es)) (s2l (last es))
+        [Ssym "fun", v, e] ->
             case s2l v of
                 Lvar x -> Lfun x (s2l e)
                 _ -> error (argsMatchError se)
         (Ssym "fun" : v : vs) ->
             case s2l v of
-                Lvar x -> Lfun x (s2l' se ([Ssym "fun"] ++ vs))
+                Lvar x -> Lfun x (s2l' se (Ssym "fun" : vs))
                 _ -> error (argsMatchError se)
         _ -> error (unrecExp se)
 
--- Analyse une Sexp et construit un Ltype équivalent
--- Appelée lorsqu'une expression indique des types
+-- Builds an Ltype from a Sexp (used wherever a type is written).
 s2t :: Sexp -> Ltype
 s2t (Ssym "Int") = Lint
 s2t (Ssym "Bool") = Lboo
@@ -296,51 +268,47 @@ s2t (se@(Scons _ _)) =
               | otherwise -> error (unrecType se)
 s2t se = error (unrecType se)
 
--- Fonction auxiliaire de s2t traitant les cas avec récursion (currying)
--- Fonction accomodant au sucre syntaxique de types de fonctions
+-- Helper for s2t: handles curried function types.
 s2t' :: Sexp -> [Sexp] -> Ltype
 s2t' se selist =
     case selist of
-        (ta : Ssym "->" : tr : []) -> Larw (s2t ta) (s2t tr)
+        [ta, Ssym "->", tr] -> Larw (s2t ta) (s2t tr)
         _ | (last (init selist)) == Ssym "->" ->
               Larw (s2t (head selist)) (s2t' se (tail selist))
           | otherwise -> error (unrecType se)
 
--- Analyse une Sexp et construit une liste de tuple (Var, Lexp)
--- Appelée lors de l'analyse de l'expression let où s'y trouve des déclarations
--- Les fonctions getArgs et getTypes récupèrent les variables et les types
-    -- associées à une fonction lors d'une déclaration afin de fournir
-    -- les informations nécessaires aux étapes d'inférence de types et
-    -- d'évaluation d'expression
+-- Builds the (Var, Lexp) bindings of a let.
+-- getArgs and getTypes pull the argument names and the type out of a
+-- function declaration for the type-checking and evaluation stages.
 s2d :: Sexp -> [Sexp] -> [(Var, Lexp)]
 s2d _ [] = []
 s2d se (d : ds) =
     let
         getArgs [] = []
-        getArgs (a : as) = (head (sexp2list a)) : getArgs as 
+        getArgs (a : as) = (head (sexp2list a)) : getArgs as
         getTypes [] = error "Type not specified"
-        getTypes (t : []) = Ssym "->" : t : []
+        getTypes [t] = [Ssym "->", t]
         getTypes (t : ts) = (last (sexp2list t)) : getTypes ts
         selist = sexp2list d
     in
         if length selist < 2
         then error ("Invalid declaration: " ++ (showSexp se))
-        else 
+        else
             case selist of
-                (Ssym x : e : []) -> (x, s2l e) : s2d se ds
-                (Ssym x : t : e : []) -> (x, Lhastype (s2l e) (s2t t))
+                [Ssym x, e] -> (x, s2l e) : s2d se ds
+                [Ssym x, t, e] -> (x, Lhastype (s2l e) (s2t t))
                     : s2d se ds
                 (Ssym x : es) -> (x, Lhastype
-                    (s2l' se ([Ssym "fun"] ++ getArgs (init(init es))
-                        ++ [(last es)]))
+                    (s2l' se (Ssym "fun" : getArgs (init (init es))
+                        ++ [last es]))
                     (s2t' se (getTypes (init es)))) : (s2d se ds)
                 _ -> error ("Unrecognized Psil declaration: " ++ (showSexp se))
 
 ---------------------------------------------------------------------------
--- Évaluateur                                                            --
+-- Evaluator                                                             --
 ---------------------------------------------------------------------------
 
--- Type des valeurs renvoyées par l'évaluateur.
+-- Values produced by the evaluator.
 data Value = Vnum Int
            | Vbool Bool
            | Vtuple [Value]
@@ -359,7 +327,7 @@ instance Show Value where
 
 type Env = [(Var, Value, Ltype)]
 
--- L'environnement initial qui contient les fonctions prédéfinies et leur type.
+-- Initial environment: the built-in functions and their types.
 env0 :: Env
 env0 = [prim "+"  (+) Vnum  Lint,
         prim "-"  (-) Vnum  Lint,
@@ -375,11 +343,10 @@ env0 = [prim "+"  (+) Vnum  Lint,
                                        (\ (Vnum y) -> cons (x `op` y))),
                Larw Lint (Larw Lint typ))
 
--- Point d'entrée de l'évaluation
+-- Entry point for evaluation.
 eval :: Env -> Lexp -> Value
 eval env e =
-  -- Extrait la liste des variables et la liste de leur valeurs,
-  -- et ignore leurs types, qui n'est plus utile pendant l'évaluation.
+  -- Split the env into names and values; types are unused at eval time.
   eval2 (map (\(x,_,_) -> x) env) e (map (\(_,v,_) -> v) env)
 
 e2lookup :: [Var] -> Var -> Int          -- Find position within environment
@@ -389,21 +356,18 @@ e2lookup env x = e2lookup' env 0
           e2lookup' (x':_) i | x == x' = i
           e2lookup' (_:xs) i = e2lookup' xs (i + 1)
 
--------------- La fonction d'évaluation principale.  ------------------------
--- Au lieu de recevoir une liste de paires (Var, Val), on passe la liste
--- des noms de variables (`senv`) et la liste des valeurs correspondantes
--- (`venv`) séparément de manière à ce que (eval2 senv e) renvoie une
--- fonction qui a déjà fini d'utiliser `senv`.
+-------------- Main evaluation function.  -----------------------------------
+-- Instead of one list of (Var, Value) pairs, the names (`senv`) and the
+-- values (`venv`) are passed separately so that (eval2 senv e) returns a
+-- function that is already done with `senv`.
 eval2 :: [Var] -> Lexp -> ([Value] -> Value)
 eval2 _ (Lnum n) = \_ -> Vnum n
 eval2 senv (Lhastype e _) = eval2 senv e
 eval2 senv (Lvar x) =
-    -- Calcule la position que la variable aura dans `venv`.
+    -- Resolve the variable's position once, so a function returned by
+    -- (eval2 senv v) does the name lookup only once however often it runs.
     let
         i = e2lookup senv x
-    -- Renvoie une fonction qui n'a plus besoin de charcher et comparer le nom.
-    -- De cette manière, si la fonction renvoyée par (eval2 senv v) est appelée
-    -- plusieurs fois, on aura fait la recherche dans `senv` une seule fois.
     in
         \venv -> venv !! i
 
@@ -450,24 +414,23 @@ eval2 senv (Lfetch tup vs e) = \venv ->
         (eval2 senv' e) venv'
 
 ---------------------------------------------------------------------------
--- Vérificateur de types                                                 --
+-- Type checker                                                          --
 ---------------------------------------------------------------------------
 
 type TEnv = [(Var, Ltype)]
 type TypeError = String
 
--- Les valeurs ne servent à rien pendant la vérification de type,
--- donc extrait la partie utile de `env0`.
+-- Values are irrelevant to type checking, so keep only the types from env0.
 tenv0 :: TEnv
 tenv0 = (map (\(x,_,t) -> (x,t)) env0)
 
--- Recherche du type d'une variable
+-- Looks up the type of a variable.
 tlookup :: [(Var, a)] -> Var -> a
 tlookup [] x = error ("Unknown variable: " ++ x)
 tlookup ((x',t):_) x | x == x' = t
 tlookup (_:env) x = tlookup env x
 
--- Règles de typage - Règle de synthèse
+-- Typing rules: type synthesis.
 infer :: TEnv -> Lexp -> Ltype
 infer _ (Lnum _) = Lint
 infer tenv (Lvar x) = tlookup tenv x
@@ -500,7 +463,7 @@ infer _ (Lfun _ _)     = error "Can't infer type of `fun`"
 infer _ (Lif _ _ _)    = error "Can't infer type of `if`"
 infer _ (Lfetch _ _ _) = error "Can't infer type of `fetch`"
 
--- Règles de typage - Jugement de vérification
+-- Typing rules: checking judgment.
 check :: TEnv -> Lexp -> Ltype -> Maybe TypeError
 check tenv (Lfun x body) (Larw t1 t2) = check ((x, t1) : tenv) body t2
 check _ (Lfun _ _) t = Just ("Not a function type: " ++ show t)
@@ -532,7 +495,7 @@ check tenv (Lfetch tup xs e) t =
         else check ((zip xs tupleType) ++ tenv) e t
 
 check tenv e t =
-    -- Essaie d'inférer le type et vérifie s'il correspond au type attendu
+    -- Fall back to synthesis and compare with the expected type.
     let
         t' = infer tenv e
     in
@@ -543,8 +506,7 @@ check tenv e t =
 -- Toplevel                                                              --
 ---------------------------------------------------------------------------
 
--- Lit un fichier contenant plusieurs Sexps, les évalues l'une après
--- l'autre, et renvoie la liste des valeurs obtenues.
+-- Reads a file of Sexps, evaluates each one, and prints its value and type.
 run :: FilePath -> IO ()
 run filename =
     do filestring <- readFile filename

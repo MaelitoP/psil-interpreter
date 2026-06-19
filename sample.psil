@@ -1,4 +1,4 @@
-;;; Quelques exemples.              -*- mode: lisp-data; coding: utf-8 -*-
+;;; A few examples.              -*- mode: lisp-data; coding: utf-8 -*-
 
 2                                       ; ↝ 2
 +                                       ; ↝ <fun +>
@@ -43,8 +43,8 @@
      (plus (x Int) (Int -> Int) (fun y (call + y x)))
   (call plus1 5))                       ; ↝ 6
 
-; Test 2 NOT WORKING
+; Recursive definitions via let are not supported yet:
 ; (let (fact (n Int) Int (if (call = n 0) 1 (call (call * n) (call fact (call - n 1))))) (call fact 5))
   
-; Test 3 NOT WORKING
+; (the same applies to mutually recursive definitions)
 ; (hastype (let (even (x Int) Bool (if (call = x 0) (call = 0 0) (call odd (call - x 1)))) (odd (x Int) Bool (if (call = x 0) (call = 1 0) (call even (call - x 1)))) (call odd 8)) Bool)

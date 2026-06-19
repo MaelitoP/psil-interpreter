@@ -1,4 +1,4 @@
-;;; Fichier des tests.              -*- mode: lisp-data; coding: utf-8 -*-
+;;; Test expressions.              -*- mode: lisp-data; coding: utf-8 -*-
 
 (let 5)
 

@@ -1,48 +1,12 @@
-[![MIT License][license-shield]][license-url]
-[![LinkedIn][linkedin-shield]][linkedin-url]
+Psil is a small statically typed functional language with a Lisp-style syntax — the name is "Lisp" spelled backwards. This repository is an interpreter for it, written in Haskell.
 
-<br />
-<p align="center">
-  <h3 align="center">Psil Interpreter in Haskell</h3>
-  <p align="center"> Programming Language Concepts Course Project #1 </p>
-</p>
+The interpreter runs as a small pipeline. A Parsec reader turns source text into s-expressions, those are lowered into a typed core language, a bidirectional type checker validates each top-level expression, and an evaluator reduces it to a value. The language has integers and booleans, curried first-class functions, `let` bindings, tuples with destructuring, conditionals, and explicit type annotations.
 
+I built it to learn Haskell on something more substantial than exercises, and to see how an interpreter fits together end to end. Writing the reader, the lowering to a core language, the type checker, and the evaluator as distinct stages made the usual textbook pipeline concrete — in particular the split between type synthesis and checking, and the way currying falls out of a core with single-argument functions.
 
+`sample.psil` shows the surface syntax; `tests.psil` collects longer expressions. Functions are applied with an explicit `(call f x)` form, and every top-level expression is printed back as `value : type`.
 
-<!-- TABLE OF CONTENTS -->
-<details open="open">
-  <summary>Table of Contents</summary>
-  <ol>
-    <li>
-      <a href="#about-the-project">About The Project</a>
-    </li>
-    <li><a href="#license">License</a></li>
-    <li><a href="#contact">Contact</a></li>
-  </ol>
-</details>
+Running it needs GHC and the `parsec` package. Load the source in GHCi and evaluate a file:
 
-
-
-<!-- ABOUT THE PROJECT -->
-## About The Project
-
-This tutorial aims at improving the understanding of functional languages by using a functional programming language (Haskell) and by writing a part of an interpreter of a functional programming language (a kind of Lisp).
-You can find the instructions [here](https://github.com/MaelitoP/lips-interpreter/blob/main/psil.pdf).
-
-<!-- LICENSE -->
-## License
-
-Distributed under the MIT License. See `LICENSE` for more information.
-
-<!-- CONTACT -->
-## Contact
-
-Maël LE PETIT - [@Maelito_P](https://twitter.com/Maelito_P) - contact@maelito.fr
-
-Project Link: [https://github.com/MaelitoP/lips-interpreter](https://github.com/MaelitoP/lips-interpreter)
-
-<!-- MARKDOWN LINKS & IMAGES -->
-[license-shield]: https://img.shields.io/github/license/othneildrew/Best-README-Template.svg?style=for-the-badge
-[license-url]: https://github.com/MaelitoP/lips-interpreter/blob/main/LICENSE
-[linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
-[linkedin-url]: https://www.linkedin.com/in/maelitop/
+    ghci psil.hs
+    > run "sample.psil"
