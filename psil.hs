@@ -6,6 +6,7 @@
 
 import Text.ParserCombinators.Parsec
 import Data.Char
+import System.Environment (getArgs)
 import System.IO
 
 ---------------------------------------------------------------------------
@@ -505,6 +506,13 @@ check tenv e t =
 ---------------------------------------------------------------------------
 -- Toplevel                                                              --
 ---------------------------------------------------------------------------
+
+main :: IO ()
+main = do
+    args <- getArgs
+    case args of
+        [path] -> run path
+        _ -> hPutStrLn stderr "usage: psil FILE.psil"
 
 -- Reads a file of Sexps, evaluates each one, and prints its value and type.
 run :: FilePath -> IO ()

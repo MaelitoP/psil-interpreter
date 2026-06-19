@@ -6,7 +6,7 @@ I built it to learn Haskell on something more substantial than exercises, and to
 
 `sample.psil` shows the surface syntax; `tests.psil` collects longer expressions. Functions are applied with an explicit `(call f x)` form, and every top-level expression is printed back as `value : type`.
 
-Running it needs GHC and the `parsec` package. Load the source in GHCi and evaluate a file:
+Running it needs GHC and the `parsec` package. Run a file directly, or compile a binary first:
 
-    ghci psil.hs
-    > run "sample.psil"
+    runghc psil.hs sample.psil
+    ghc psil.hs -o psil && ./psil sample.psil
