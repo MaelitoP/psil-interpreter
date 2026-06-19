@@ -5,6 +5,7 @@
 -- lowering to a typed core, a type checker, and an evaluator.
 
 import Text.ParserCombinators.Parsec
+import Control.Monad (foldM)
 import Data.Char
 import System.Environment (getArgs)
 import System.IO
@@ -116,14 +117,14 @@ pSexpTop = do { pTsil <|> pQuote <|> pSymbol
                 <|> do { x <- pAny;
                          case x of
                            Nothing -> pzero
-                           Just c -> error ("Unexpected char '" ++ [c] ++ "'")
+                           Just c -> fail ("Unexpected char '" ++ [c] ++ "'")
                        }
               }
 
 -- A top-level Sexp and a sub-Sexp are parsed differently: a sub-Sexp failing
 -- at EOF is a syntax error, whereas a top-level Sexp failing there is normal.
 pSexp :: Parser Sexp
-pSexp = pSexpTop <|> error "Unexpected end of stream"
+pSexp = pSexpTop <|> fail "Unexpected end of stream"
 
 -- A sequence of Sexps.
 pSexps :: Parser [Sexp]
@@ -185,6 +186,8 @@ data Lexp = Lnum Int                -- Integer constant
 -- Sexp to Lexp                                                          --
 ---------------------------------------------------------------------------
 
+type Error = String
+
 argsNumError :: Sexp -> String
 argsNumError x = "Insufficient arguments for expression " ++ showSexp x
 
@@ -198,112 +201,122 @@ unrecType :: Sexp -> String
 unrecType x = "Unrecognized Psil type: " ++ showSexp x
 
 -- Converts a Sexp list into a Haskell list of its elements.
-sexp2list :: Sexp -> [Sexp]
+sexp2list :: Sexp -> Either Error [Sexp]
 sexp2list s = loop s []
     where
         loop (Scons hds tl) acc = loop hds (tl : acc)
-        loop Snil acc = acc
-        loop _ _ = error ("Improper list: " ++ show s)
+        loop Snil acc = Right acc
+        loop _ _ = Left ("Improper list: " ++ show s)
 
 -- Builds a Lexp from a Sexp.
-s2l :: Sexp -> Lexp
-s2l (Snum n) = Lnum n
-s2l (Ssym s) = Lvar s
-s2l (se@(Scons _ _)) =
-    let
-        selist = sexp2list se
-    in
-        case selist of
-            [Ssym "hastype", e, t] -> Lhastype (s2l e) (s2t t)
-            (Ssym "call" : es) ->
-                if length es < 2
-                then error (argsNumError se)
-                else s2l' se selist
-            (Ssym "fun" : es) ->
-                if length es < 2
-                then error (argsNumError se)
-                else s2l' se selist
-            (Ssym "let" : es) ->
-                if null es
-                then error (argsNumError se)
-                else Llet (s2d se (init es)) (s2l (last es))
-            [Ssym "if", e1, e2, e3] -> Lif (s2l e1) (s2l e2) (s2l e3)
-            (Ssym "tuple" : es) -> Ltuple (map s2l es)
-            [Ssym "fetch", tpl, xs, e] -> Lfetch (s2l tpl)
-                (map (\x -> case s2l x of
-                    Lvar s -> s
-                    _ -> error (argsMatchError se))
-                (sexp2list xs)) (s2l e)
-            _ -> error (unrecExp se)
-s2l se = error (unrecExp se)
+s2l :: Sexp -> Either Error Lexp
+s2l (Snum n) = Right (Lnum n)
+s2l (Ssym s) = Right (Lvar s)
+s2l (se@(Scons _ _)) = do
+    selist <- sexp2list se
+    case selist of
+        [Ssym "hastype", e, t] -> Lhastype <$> s2l e <*> s2t t
+        (Ssym "call" : es)
+            | length es < 2 -> Left (argsNumError se)
+            | otherwise -> s2l' se selist
+        (Ssym "fun" : es)
+            | length es < 2 -> Left (argsNumError se)
+            | otherwise -> s2l' se selist
+        (Ssym "let" : es)
+            | null es -> Left (argsNumError se)
+            | otherwise -> Llet <$> s2d se (init es) <*> s2l (last es)
+        [Ssym "if", e1, e2, e3] -> Lif <$> s2l e1 <*> s2l e2 <*> s2l e3
+        (Ssym "tuple" : es) -> Ltuple <$> mapM s2l es
+        [Ssym "fetch", tpl, xs, e] -> do
+            tpl' <- s2l tpl
+            names <- sexp2list xs >>= mapM asVar
+            e' <- s2l e
+            Right (Lfetch tpl' names e')
+        _ -> Left (unrecExp se)
+    where
+        asVar x = case s2l x of
+            Right (Lvar s) -> Right s
+            _ -> Left (argsMatchError se)
+s2l se = Left (unrecExp se)
 
 -- Helper for s2l: handles currying for function definitions and calls.
-s2l' :: Sexp -> [Sexp] -> Lexp
+s2l' :: Sexp -> [Sexp] -> Either Error Lexp
 s2l' se selist =
     case selist of
-        [Ssym "call", e, e1] -> Lcall (s2l e) (s2l e1)
+        [Ssym "call", e, e1] -> Lcall <$> s2l e <*> s2l e1
         (Ssym "call" : es) ->
-            Lcall (s2l' se (Ssym "call" : init es)) (s2l (last es))
-        [Ssym "fun", v, e] ->
-            case s2l v of
-                Lvar x -> Lfun x (s2l e)
-                _ -> error (argsMatchError se)
-        (Ssym "fun" : v : vs) ->
-            case s2l v of
-                Lvar x -> Lfun x (s2l' se (Ssym "fun" : vs))
-                _ -> error (argsMatchError se)
-        _ -> error (unrecExp se)
+            Lcall <$> s2l' se (Ssym "call" : init es) <*> s2l (last es)
+        [Ssym "fun", v, e] -> do
+            v' <- s2l v
+            case v' of
+                Lvar x -> Lfun x <$> s2l e
+                _ -> Left (argsMatchError se)
+        (Ssym "fun" : v : vs) -> do
+            v' <- s2l v
+            case v' of
+                Lvar x -> Lfun x <$> s2l' se (Ssym "fun" : vs)
+                _ -> Left (argsMatchError se)
+        _ -> Left (unrecExp se)
 
 -- Builds an Ltype from a Sexp (used wherever a type is written).
-s2t :: Sexp -> Ltype
-s2t (Ssym "Int") = Lint
-s2t (Ssym "Bool") = Lboo
-s2t (se@(Scons _ _)) =
-    let
-        selist = sexp2list se
-    in
-        case selist of
-            (Ssym "Tuple" : ts) -> Ltup (map s2t ts)
-            _ | length selist < 2 -> error (unrecType se)
-              | (last (init selist)) == Ssym "->" -> s2t' se selist
-              | otherwise -> error (unrecType se)
-s2t se = error (unrecType se)
+s2t :: Sexp -> Either Error Ltype
+s2t (Ssym "Int") = Right Lint
+s2t (Ssym "Bool") = Right Lboo
+s2t (se@(Scons _ _)) = do
+    selist <- sexp2list se
+    case selist of
+        (Ssym "Tuple" : ts) -> Ltup <$> mapM s2t ts
+        _ | length selist < 2 -> Left (unrecType se)
+          | last (init selist) == Ssym "->" -> s2t' se selist
+          | otherwise -> Left (unrecType se)
+s2t se = Left (unrecType se)
 
 -- Helper for s2t: handles curried function types.
-s2t' :: Sexp -> [Sexp] -> Ltype
+s2t' :: Sexp -> [Sexp] -> Either Error Ltype
 s2t' se selist =
     case selist of
-        [ta, Ssym "->", tr] -> Larw (s2t ta) (s2t tr)
-        _ | (last (init selist)) == Ssym "->" ->
-              Larw (s2t (head selist)) (s2t' se (tail selist))
-          | otherwise -> error (unrecType se)
+        [ta, Ssym "->", tr] -> Larw <$> s2t ta <*> s2t tr
+        (t0 : rest@(_ : _))
+            | last (init selist) == Ssym "->" -> Larw <$> s2t t0 <*> s2t' se rest
+        _ -> Left (unrecType se)
 
 -- Builds the (Var, Lexp) bindings of a let.
 -- getArgs and getTypes pull the argument names and the type out of a
 -- function declaration for the type-checking and evaluation stages.
-s2d :: Sexp -> [Sexp] -> [(Var, Lexp)]
-s2d _ [] = []
-s2d se (d : ds) =
-    let
-        getArgs [] = []
-        getArgs (a : as) = (head (sexp2list a)) : getArgs as
-        getTypes [] = error "Type not specified"
-        getTypes [t] = [Ssym "->", t]
-        getTypes (t : ts) = (last (sexp2list t)) : getTypes ts
-        selist = sexp2list d
-    in
-        if length selist < 2
-        then error ("Invalid declaration: " ++ (showSexp se))
-        else
-            case selist of
-                [Ssym x, e] -> (x, s2l e) : s2d se ds
-                [Ssym x, t, e] -> (x, Lhastype (s2l e) (s2t t))
-                    : s2d se ds
-                (Ssym x : es) -> (x, Lhastype
-                    (s2l' se (Ssym "fun" : getArgs (init (init es))
-                        ++ [last es]))
-                    (s2t' se (getTypes (init es)))) : (s2d se ds)
-                _ -> error ("Unrecognized Psil declaration: " ++ (showSexp se))
+s2d :: Sexp -> [Sexp] -> Either Error [(Var, Lexp)]
+s2d _ [] = Right []
+s2d se (d : ds) = do
+    selist <- sexp2list d
+    if length selist < 2
+        then Left ("Invalid declaration: " ++ showSexp se)
+        else case selist of
+            [Ssym x, e] -> bind x (s2l e)
+            [Ssym x, t, e] -> bind x (Lhastype <$> s2l e <*> s2t t)
+            (Ssym x : es) -> do
+                args <- getArgs (init (init es))
+                typs <- getTypes (init es)
+                bind x (Lhastype <$> s2l' se (Ssym "fun" : args ++ [last es])
+                                 <*> s2t' se typs)
+            _ -> Left ("Unrecognized Psil declaration: " ++ showSexp se)
+    where
+        bind x body = do
+            lexp <- body
+            rest <- s2d se ds
+            Right ((x, lexp) : rest)
+        getArgs = mapM firstSym
+        firstSym a = do
+            l <- sexp2list a
+            case l of
+                (v : _) -> Right v
+                [] -> Left ("Empty argument: " ++ showSexp a)
+        getTypes [] = Left "Type not specified"
+        getTypes [t] = Right [Ssym "->", t]
+        getTypes (t : ts) = do
+            l <- sexp2list t
+            rest <- getTypes ts
+            case reverse l of
+                (lastT : _) -> Right (lastT : rest)
+                [] -> Left ("Empty type: " ++ showSexp t)
 
 ---------------------------------------------------------------------------
 -- Evaluator                                                             --
@@ -419,94 +432,77 @@ eval2 senv (Lfetch tup vs e) = \venv ->
 ---------------------------------------------------------------------------
 
 type TEnv = [(Var, Ltype)]
-type TypeError = String
 
 -- Values are irrelevant to type checking, so keep only the types from env0.
 tenv0 :: TEnv
 tenv0 = (map (\(x,_,t) -> (x,t)) env0)
 
 -- Looks up the type of a variable.
-tlookup :: [(Var, a)] -> Var -> a
-tlookup [] x = error ("Unknown variable: " ++ x)
-tlookup ((x',t):_) x | x == x' = t
+tlookup :: [(Var, a)] -> Var -> Either Error a
+tlookup [] x = Left ("Unknown variable: " ++ x)
+tlookup ((x',t):_) x | x == x' = Right t
 tlookup (_:env) x = tlookup env x
 
 -- Typing rules: type synthesis.
-infer :: TEnv -> Lexp -> Ltype
-infer _ (Lnum _) = Lint
+infer :: TEnv -> Lexp -> Either Error Ltype
+infer _ (Lnum _) = Right Lint
 infer tenv (Lvar x) = tlookup tenv x
-
-infer tenv (Lhastype e t)
-    | te == Nothing = t
-    | otherwise = let Just msg = te in error msg
-    where
-        te = check tenv e t
-
-infer tenv (Lcall e1 e2)
-    | te == Nothing = t2
-    | otherwise = let Just msg = te in error msg
-    where
-        Larw t1 t2 = infer tenv e1
-        te = check tenv e2 t1
-
+infer tenv (Lhastype e t) = check tenv e t >> Right t
+infer tenv (Lcall e1 e2) = do
+    ft <- infer tenv e1
+    case ft of
+        Larw t1 t2 -> check tenv e2 t1 >> Right t2
+        _ -> Left ("Not a function: " ++ show ft)
 infer tenv (Llet ds b) =
-    -- Bindings may be mutually recursive: seed the environment from their
-    -- declared types so recursive references resolve without looping.
+    -- Bindings may be mutually recursive: seed the environment from the
+    -- declared types of annotated bindings so recursive references resolve.
     let
-        (vars, exps) = unzip ds
-        bindingType (Lhastype _ t) = t
-        bindingType e = infer tenv' e
-        tenv' = zip vars (map bindingType exps) ++ tenv
-        checkBinding (Lhastype body t) = check tenv' body t
-        checkBinding _ = Nothing
-    in
-        case [msg | Just msg <- map checkBinding exps] of
-            (msg : _) -> error msg
-            [] -> infer tenv' b
-
-infer tenv (Ltuple es) = Ltup (map (infer tenv) es)
-infer _ (Lfun _ _)     = error "Can't infer type of `fun`"
-infer _ (Lif _ _ _)    = error "Can't infer type of `if`"
-infer _ (Lfetch _ _ _) = error "Can't infer type of `fetch`"
+        annotated = [(v, t) | (v, Lhastype _ t) <- ds]
+        baseEnv = annotated ++ tenv
+        addBinding env (_, Lhastype _ _) = Right env
+        addBinding env (v, e) = (\t -> (v, t) : env) <$> infer env e
+        checkBinding fullEnv (_, Lhastype body t) = check fullEnv body t
+        checkBinding _ _ = Right ()
+    in do
+        fullEnv <- foldM addBinding baseEnv ds
+        mapM_ (checkBinding fullEnv) ds
+        infer fullEnv b
+infer tenv (Ltuple es) = Ltup <$> mapM (infer tenv) es
+infer _ (Lfun _ _)     = Left "Can't infer type of `fun`"
+infer _ (Lif _ _ _)    = Left "Can't infer type of `if`"
+infer _ (Lfetch _ _ _) = Left "Can't infer type of `fetch`"
 
 -- Typing rules: checking judgment.
-check :: TEnv -> Lexp -> Ltype -> Maybe TypeError
+check :: TEnv -> Lexp -> Ltype -> Either Error ()
 check tenv (Lfun x body) (Larw t1 t2) = check ((x, t1) : tenv) body t2
-check _ (Lfun _ _) t = Just ("Not a function type: " ++ show t)
-
-check tenv (Lif e1 e2 e3) t
-    | te1 /= Nothing = te1
-    | te2 /= Nothing = te2
-    | te3 /= Nothing = te3
-    | otherwise = Nothing
-    where
-        te1 = check tenv e1 Lboo
-        te2 = check tenv e2 t
-        te3 = check tenv e3 t
-
-check tenv (Lfetch tup xs e) t =
-    let
-        tupleType = case tup of
-            Ltuple _ -> let Ltup list = infer tenv tup in list
-            Lvar var -> case tlookup tenv var of
-                Ltup list -> list
-                _ -> error ("Not a tuple")
-            _ -> error ("Not a tuple")
-        tuplength = length tupleType
-        varlength = length xs
-    in
-        if tuplength /= varlength
-        then error ("Tuple length and number of variables mismatch: " ++
-            show tuplength ++ " != "  ++ show varlength)
-        else check ((zip xs tupleType) ++ tenv) e t
-
-check tenv e t =
+check _ (Lfun _ _) t = Left ("Not a function type: " ++ show t)
+check tenv (Lif e1 e2 e3) t = do
+    check tenv e1 Lboo
+    check tenv e2 t
+    check tenv e3 t
+check tenv (Lfetch tup xs e) t = do
+    tupleType <- case tup of
+        Ltuple _ -> do
+            tt <- infer tenv tup
+            case tt of
+                Ltup list -> Right list
+                _ -> Left "Not a tuple"
+        Lvar var -> do
+            tt <- tlookup tenv var
+            case tt of
+                Ltup list -> Right list
+                _ -> Left "Not a tuple"
+        _ -> Left "Not a tuple"
+    if length tupleType /= length xs
+        then Left ("Tuple length and number of variables mismatch: "
+                   ++ show (length tupleType) ++ " != " ++ show (length xs))
+        else check (zip xs tupleType ++ tenv) e t
+check tenv e t = do
     -- Fall back to synthesis and compare with the expected type.
-    let
-        t' = infer tenv e
-    in
-        if t == t' then Nothing
-        else Just ("Type mismatch: " ++ show t ++ " != " ++ show t')
+    t' <- infer tenv e
+    if t == t'
+        then Right ()
+        else Left ("Type mismatch: " ++ show t ++ " != " ++ show t')
 
 ---------------------------------------------------------------------------
 -- Toplevel                                                              --
@@ -520,29 +516,27 @@ main = do
         _ -> hPutStrLn stderr "usage: psil FILE.psil"
 
 -- Reads a file of Sexps, evaluates each one, and prints its value and type.
+-- A failing expression is reported and the rest still run.
 run :: FilePath -> IO ()
-run filename =
-    do filestring <- readFile filename
-       (hPutStr stdout)
-           (let sexps s = case parse pSexps filename s of
-                            Left _ -> [Ssym "#<parse-error>"]
-                            Right es -> es
-            in (concat
-                (map (\ sexp -> let { ltyp = infer tenv0 lexp
-                                   ; lexp = s2l sexp
-                                   ; val = eval env0 lexp }
-                               in "  " ++ show val
-                                  ++ " : " ++ show ltyp ++ "\n")
-                     (sexps filestring))))
+run filename = do
+    src <- readFile filename
+    case parse pSexps filename src of
+        Left err -> hPutStrLn stderr ("Parse error: " ++ show err)
+        Right sexps -> mapM_ (putStrLn . evalTop) sexps
+    where
+        evalTop sexp = case s2l sexp >>= \lexp -> (,) lexp <$> infer tenv0 lexp of
+            Left err -> "  error: " ++ err
+            Right (lexp, ltyp) ->
+                "  " ++ show (eval env0 lexp) ++ " : " ++ show ltyp
 
 sexpOf :: String -> Sexp
 sexpOf = read
 
-lexpOf :: String -> Lexp
+lexpOf :: String -> Either Error Lexp
 lexpOf = s2l . sexpOf
 
-typeOf :: String -> Ltype
-typeOf = infer tenv0 . lexpOf
+typeOf :: String -> Either Error Ltype
+typeOf s = lexpOf s >>= infer tenv0
 
-valOf :: String -> Value
-valOf = eval env0 . lexpOf
+valOf :: String -> Either Error Value
+valOf s = eval env0 <$> lexpOf s
