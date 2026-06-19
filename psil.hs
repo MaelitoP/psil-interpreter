@@ -450,14 +450,19 @@ infer tenv (Lcall e1 e2)
         te = check tenv e2 t1
 
 infer tenv (Llet ds b) =
+    -- Bindings may be mutually recursive: seed the environment from their
+    -- declared types so recursive references resolve without looping.
     let
-        (tenvn, tenvt) = unzip tenv
         (vars, exps) = unzip ds
-        tenvn' = vars ++ tenvn
-        tenvt' = (map infer' exps) ++ tenvt
-        infer' = \e -> infer (zip tenvn' tenvt') e
+        bindingType (Lhastype _ t) = t
+        bindingType e = infer tenv' e
+        tenv' = zip vars (map bindingType exps) ++ tenv
+        checkBinding (Lhastype body t) = check tenv' body t
+        checkBinding _ = Nothing
     in
-        infer' b
+        case [msg | Just msg <- map checkBinding exps] of
+            (msg : _) -> error msg
+            [] -> infer tenv' b
 
 infer tenv (Ltuple es) = Ltup (map (infer tenv) es)
 infer _ (Lfun _ _)     = error "Can't infer type of `fun`"
